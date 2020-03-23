@@ -88,7 +88,8 @@ Class Instamojo
             throw new Exception("Unable to Fetch Payment Request id:'$id' Server Responds " . print_r($result, true));
     }
 
-    public function getPaymentStatus($payment_id, $payments) {
+    public function getPaymentStatus($payment_id, $payments) 
+    {
         foreach ($payments as $payment) {
             if ($payment->id == $payment_id) {
                 return $payment->status;
@@ -96,53 +97,85 @@ Class Instamojo
         }
     }
     
-    public function createPaymentRequest($data) {
+    public function createPaymentRequest($data)
+    {
         $endpoint = $this->api_endpoint . "payment_requests/";
         $result = $this->curl->post($endpoint, $data, array("headers" => $this->auth_headers));
         
         return json_decode($result);
     } 
     
-    public function getPaymentDetail($paymentId) {
+    public function getPaymentDetail($paymentId) 
+    {
         $endpoint = $this->api_endpoint . "payments/$paymentId/";
         $result = $this->curl->get($endpoint,array("headers" => $this->auth_headers));
         
         return json_decode($result);         
     }
     
-    public function getPaymentsList($query_string) {
+    public function getPaymentList($query_string) 
+    {
         $endpoint = $this->api_endpoint . 'payments?' . http_build_query($query_string);
         $result = $this->curl->get($endpoint,array("headers" => $this->auth_headers));
         
         return json_decode($result);
     }
     
-    public function createRefund($payment_id, $data) {
+    public function createRefund($payment_id, $data) 
+    {
         $endpoint = $this->api_endpoint . 'payments/' . $payment_id . '/refund/' ;
         $result = $this->curl->post($endpoint, $data, array("headers" => $this->auth_headers));
         
         return json_decode($result);
     }
     
-    public function checkPaymentStatus($payment_id, $response)  {
-       if($response['result'] == 'success') {
-            if($response['payment_detail']->id == $payment_id) {
-                return $response['payment_detail']->status;
+    public function initiateGatewayOrder($data) 
+    {
+        $endpoint = $this->api_endpoint .'gateway/orders/';
+        $result = $this->curl->post($endpoint, $data, array('headers' => $this->auth_headers));
+        
+        return json_decode($result);         
+    }
+    
+    public function getGatewayOrder($id) 
+    {
+        $endpoint = $this->api_endpoint . 'gateway/orders/id:' . $id;
+        $result = $this->curl->get($endpoint, array('headers' => $this->auth_headers));
+
+        return json_decode($result);
+    }
+    
+    public function getCheckoutOptionForGatewayOrder($id)
+    {
+        $endpoint = $this->api_endpoint . 'gateway/orders/' . $id . '/checkout-options/';
+        $result = $this->curl->get($endpoint, array('headers' => $this->auth_headers));
+
+        return json_decode($result);
+    }
+    
+    public function checkPaymentStatus($payment_id, $response)  
+    {
+       if($response['status'] == 'success') {
+            if($response['response']->id == $payment_id) {
+                return $response['response']->status;
             }
         }
     }
     
-    public function handlleCurlException($e) {
+    public function handleCurlException($e) 
+    {
         $this->logger->write("An error occurred on line " . $e->getLine() . " with message " .  $e->getMessage());
         $this->displayError($e->getMessage());
     }
     
-    public function handlleException($e) {
+    public function handleException($e) 
+    {
         $this->logger->write("An error occurred on line " . $e->getLine() . " with message " .  $e->getMessage());
         $this->displayError($e->getMessage());
     }
     
-    public function handlleValidationException($e) {
+    public function handleValidationException($e) 
+    {
         $this->logger->write("Validation Exception Occured with response ".print_r($e->getResponse(), true));
         $errors = '';
         foreach ($e->getErrors() as $error) {
@@ -151,7 +184,8 @@ Class Instamojo
         $this->displayError($errors);
     }
     
-    public function displayError($errors_html) {
+    public function displayError($errors_html) 
+    {
         $json = array(
             "result"=>"failure",
             "messages"=>$errors_html           

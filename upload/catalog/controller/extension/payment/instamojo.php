@@ -1,16 +1,21 @@
 <?php
 
 require __DIR__ . "/lib/Instamojo.php";
+require __DIR__ . "/lib/Validator.php";
 
 class ControllerExtensionPaymentInstamojo extends Controller 
 {
     private $logger;
-    private $valid_refund_types = ['RFD', 'TNR', 'QFL', 'QNR', 'EWN', 'TAN', 'PTH'];
+    private $validator = null;
     
+    private const DEFAULT_CURRENCY = 'INR';
+    private const PURPOSE_FIRLD_PREFIX = 'Order-';
+
     public function __construct($arg) 
     {
         $this->logger = new Log('imojo.log');
         parent::__construct($arg);
+        $this->validator = new Validator();
     }
 
     private function getInstamojoObject() 
@@ -42,11 +47,10 @@ class ControllerExtensionPaymentInstamojo extends Controller
         if ($order_info) {
 
             $response = $this->paymentRequest($this->session->data['order_id']);
-             
             if ($response['result'] == 'success') {
                 $method_data['action'] = $response['redirect'];
             } else {
-                $method_data['errors'] = $response['messages'];
+                $method_data['errors'] = $response['response'];
             }
 
             $method_data['telephone'] = $order_info['telephone'];
@@ -97,8 +101,8 @@ class ControllerExtensionPaymentInstamojo extends Controller
 
                 if ($payment_status == 1 OR $payment_status != 1) {
                     $this->logger->write("Response from server is $payment_status.");
-                    $order_id = $response['payment_detail']->title;
-                   
+                    $order_id = $response['response']->title;
+                    $order_id = explode('-', $order_id)[1];
                     $this->logger->write("order id: " . $order_id);
                     $this->load->model('checkout/order');
                    
@@ -132,143 +136,211 @@ class ControllerExtensionPaymentInstamojo extends Controller
 
     public function paymentRequest($orderId) 
     {
-        $this->logger->write("Creating Instamojo Order for order id: $orderId");
+        $this->logger->write("Creating Instamojo Order for order id: $orderId");        
+        $order = $this->model_checkout_order->getOrder($orderId);
         
-        $order_info = $this->model_checkout_order->getOrder($orderId);
         try {
-            $api_data['amount'] = $this->currency->format($order_info['total'], $order_info['currency_code'], false, false);
-            $api_data['purpose'] = $orderId;
-            $api_data['buyer_name'] = substr(trim((html_entity_decode($order_info['payment_firstname'] . ' ' . $order_info['payment_lastname'], ENT_QUOTES, 'UTF-8'))), 0, 20);
-            $api_data['email'] = substr($order_info['email'], 0, 75);
-            $api_data['phone'] = substr(html_entity_decode($order_info['telephone'], ENT_QUOTES, 'UTF-8'), 0, 20);
+            $api_data['buyer_name'] = $this->encodeStringData(trim($order['payment_firstname'] . ' ' . $order['payment_lastname'], ENT_QUOTES), 20);
+            $api_data['email'] = substr($order['email'], 0, 75);
+            $api_data['phone'] = $this->encodeStringData($order['telephone'], 20);
+            $api_data['amount'] = $this->currency->format($order['total'], $order['currency_code'], false, false);
             $api_data['redirect_url'] = $this->url->link('extension/payment/instamojo/confirm');
+            $api_data['purpose'] = self::PURPOSE_FIRLD_PREFIX . $orderId;
+            $api_data['send_email'] = 'True';
+            $api_data['send_sms'] = 'True';
             $api_data['allow_repeated_payments'] = 'False';
-            $api_data['send_email'] = 'False';
-            $api_data['send_sms'] = 'False';
 
-            $this->logger->write("Data Passed for creating Order : " . print_r($api_data, true));
-
-            $api = $this->getInstamojoObject();
-            $response = $api->createPaymentRequest($api_data);
-
-            $this->logger->write("Response from Server" . print_r($response, true));
-
-            if (isset($response->id)) {
-                $this->session->data['payment_request_id'] = $response->id;
-                return array('result' => 'success', 'redirect' => $response->longurl);
-            } 
-            return array('result' => 'failure', 'message' => $response->message);
-                 
+            $this->validator->set_validation_type(__FUNCTION__);
+            if ($this->validator->validate([], $api_data)) {
+                $this->logger->write("Data sent for creating order : " . print_r($api_data, true));
+                $response = $this->getInstamojoObject()->createPaymentRequest($api_data);
+                $this->logger->write("Response from server on creating payment request" . print_r($response, true));
+                if (isset($response->id)) {
+                    $this->session->data['payment_request_id'] = $response->id;
+                    return array('result' => 'success', 'redirect' => $response->longurl);
+                }
+            }
+            return array('result' => 'error', 'response' => $this->validator->get_validation_errors());
         } catch (CurlException $e) {
-            $this->handlleCurlException($e);
+            $this->handleCurlException($e);
         } catch (ValidationException $e) {
-            $this->handlleValidationException($e);
+            $this->handleValidationException($e);
         } catch (Exception $e) {
-           $this->handlleException($e);
+            $this->handleException($e);
         }        
     }
     
     public function getPaymentDetails($paymentId) 
     {       
         $this->logger->write("Getting Payment detail for payment id: $paymentId");
-
         try {
-            $api = $this->getInstamojoObject();        
-            $this->logger->write("Data sent for getting payment detail ".$paymentId);
-            
-            $response = $api->getPaymentDetail($paymentId);
-            $this->logger->write("Response from server on getting payment detail" . print_r($response, true));
-
-            if (isset($response->id)) {
-                return array('result' => 'success', 'payment_detail' => $response);
+            $this->validator->set_validation_type(__FUNCTION__);
+            if ($this->validator->validate(['payment_id' => $paymentId])) {
+                $this->logger->write("Data sent for getting payment detail " . $paymentId);
+                $response = $this->getInstamojoObject()->getPaymentDetail($paymentId);
+                $this->logger->write("Response from server on getting payment detail" . print_r($response, true));
+                if (isset($response->id)) {
+                    return array('status' => 'success', 'response' => $response);
+                }
+                return array('status' => 'error', 'response' => $response);
             }
-            return array('result' => 'error', 'message' => $response->message);
+            return array('status' => 'error', 'response' => $this->validator->get_validation_errors());
         } catch (CurlException $e) {
-            $this->handlleCurlException($e);
+            $this->handleCurlException($e);
         } catch (ValidationException $e) {
-            $this->handlleValidationException($e);
+            $this->handleValidationException($e);
         } catch (Exception $e) {
-           $this->handlleException($e);
+            $this->handleException($e);
         }
     }
     
-    public function paymentsList($page = 1, $limit = 10, $payment_id = '', $buyer_name = '', $seller_name = '', $payout = '', $product_slug = '', $order_id = '', $min_created_at = '', $max_created_at = '', $min_updated_at = '', $max_updated_at = '') 
+    public function createRefund($payment_id, $trasnaction_id, $refund_amount, $refund_type, $refund_reason)
     {
-        $this->logger->write("Getting Payments list for payment_id : $payment_id, buyer_name : $buyer_name, seller_name : $seller_name, payout : $payout, product_slug : $product_slug, order_id : $order_id, min_created_at : $min_created_at, max_created_at : $max_created_at, min_updated_at : $min_updated_at, max_updated_at : $max_updated_at");
-
-        try {
-            $api = $this->getInstamojoObject();        
-            $this->logger->write("Data sent for getting payments list");
-            
-            $query_string['page'] = $page;
-            $query_string['limit'] = $limit;
-            $query_string['id'] = $this->encode_string_data($payment_id, 20);
-            $query_string['buyer'] = $this->encode_string_data($buyer_name, 100);
-            $query_string['seller'] = $this->encode_string_data($seller_name, 100);
-            $query_string['payout'] = $this->encode_string_data($payout, 20);
-            $query_string['product'] = $this->encode_string_data($product_slug, 100);
-            $query_string['order_id'] = $this->encode_string_data($order_id, 100);
-            $query_string['min_created_at'] = $this->encode_string_data($min_created_at, 24);
-            $query_string['max_created_at'] = $this->encode_string_data($max_created_at, 24);
-            $query_string['min_updated_at'] = $this->encode_string_data($min_updated_at, 24);
-            $query_string['max_updated_at'] = $this->encode_string_data($max_updated_at, 24);
-            
-            $response = $api->getPaymentsList($this->remove_empty_elements_from_array($query_string));
-            
-            $this->logger->write("Response from server on getting payments list" . print_r($response, true));
-
-            if (isset($response->payments)) {
-                return array('result' => 'success', 'payment_list' => $response);
-            }
-            return array('result' => 'error', 'message' => $response->message);
-            
-        } catch (CurlException $e) {
-            $this->handlleCurlException($e);
-        } catch (ValidationException $e) {
-            $this->handlleValidationException($e);
-        } catch (Exception $e) {
-           $this->handlleException($e);
-        }
-    }
-    
-    public function createRefund($payment_id, $trasnaction_id, $refund_amount, $refund_type, $refund_reason) 
-    {    
         $this->logger->write("Creating Refund for payment id: $payment_id");
-
         try {
-            if (!in_array($refund_type, $this->valid_refund_types)) {
-               $this->handlleException('Invalid Refund Type :'.$refund_type);
-            }
-            $api = $this->getInstamojoObject();        
-            
             $api_data['transaction_id'] = $trasnaction_id;
             $api_data['refund_amount'] = $refund_amount;
-            $api_data['type'] = $this->encode_string_data($refund_type, 3);
-            $api_data['body'] = $this->encode_string_data($refund_reason, 100);
-            
-            $this->logger->write("Data sent for creating refund ".print_r($api_data,true));
-            
-            $response = $api->createRefund($payment_id, $api_data);
-            $this->logger->write("Response from server on creating refund".print_r($response,true));
-            
-            if (isset($response->success)) {
-                if($response->success == 1) {
-                    return array('result' => 'success', 'refund' => $response);
+            $api_data['type'] = $this->encodeStringData($refund_type, 3);
+            $api_data['body'] = $this->encodeStringData($refund_reason, 100);
+
+            $this->validator->set_validation_type(__FUNCTION__);
+            if ($this->validator->validate(['payment_id' => $payment_id], $api_data)) {
+                $this->logger->write("Data sent for creating refund " . print_r($api_data, true));
+                $response = $this->getInstamojoObject()->createRefund($payment_id, $api_data);
+                $this->logger->write("Response from server on creating refund" . print_r($response, true));
+                if (isset($response->success) && $response->success == true) {
+                    return array('status' => 'success', 'response' => $response);
                 }
+                return array('status' => 'error', 'response' => $response);
             }
-
-           return array('result' => 'error', 'message' => $response);
-
+            return array('status' => 'error', 'response' => $this->validator->get_validation_errors());
         } catch (CurlException $e) {
-            $this->handlleCurlException($e);
+            $this->handleCurlException($e);
         } catch (ValidationException $e) {
-            $this->handlleValidationException($e);
+            $this->handleValidationException($e);
         } catch (Exception $e) {
-           $this->handlleException($e);
+            $this->handleException($e);
+        }
+    }
+
+    public function getPaymentList($page = 1, $limit = 10, $payment_id = '', $buyer_name = '', $seller_name = '', $payout = '', $product_slug = '', $order_id = '', $min_created_at = '', $max_created_at = '', $min_updated_at = '', $max_updated_at = '')
+    {
+        $this->logger->write("Getting Payments list for payment_id : $payment_id, buyer_name : $buyer_name, seller_name : $seller_name, payout : $payout, product_slug : $product_slug, order_id : $order_id, min_created_at : $min_created_at, max_created_at : $max_created_at, min_updated_at : $min_updated_at, max_updated_at : $max_updated_at");
+        try {
+            $query_string['page'] = $page;
+            $query_string['limit'] = $limit;
+            $query_string['id'] = $this->encodeStringData($payment_id, 20);
+            $query_string['buyer'] = $this->encodeStringData($buyer_name, 100);
+            $query_string['seller'] = $this->encodeStringData($seller_name, 100);
+            $query_string['payout'] = $this->encodeStringData($payout, 20);
+            $query_string['product'] = $this->encodeStringData($product_slug, 100);
+            $query_string['order_id'] = $this->encodeStringData($order_id, 100);
+            $query_string['min_created_at'] = $this->encodeStringData($min_created_at, 24);
+            $query_string['max_created_at'] = $this->encodeStringData($max_created_at, 24);
+            $query_string['min_updated_at'] = $this->encodeStringData($min_updated_at, 24);
+            $query_string['max_updated_at'] = $this->encodeStringData($max_updated_at, 24);
+            
+            $this->validator->set_validation_type(__FUNCTION__);
+            if ($this->validator->validate($query_string)) {
+                $this->logger->write("Data sent for getting payments list");
+                $response = $this->getInstamojoObject()->getPaymentList($this->removeEmptyElementsFromArray($query_string));
+                $this->logger->write("Response from server on getting payment list" . print_r($response, true));
+                if (isset($response->payments)) {
+                    return array('status' => 'success', 'response' => $response);
+                }
+                return array('status' => 'error', 'response' => $response);
+            }
+            return array('status' => 'error', 'response' => $this->validator->get_validation_errors());
+        } catch (CurlException $e) {
+            $this->handleCurlException($e);
+        } catch (ValidationException $e) {
+            $this->handleValidationException($e);
+        } catch (Exception $e) {
+            $this->handleException($e);
+        }
+    }
+            
+    public function initiateGatewayOrder($orderId)
+    {
+        $this->logger->write("Initiate Gateway Orders");
+        try {
+            $order = $this->model_checkout_order->getOrder($orderId);
+            $api_data['name'] = $this->encodeStringData(trim($order['payment_firstname'] . ' ' . $order['payment_lastname'], ENT_QUOTES), 20);
+            $api_data['email'] = substr($order['email'], 0, 75);
+            $api_data['phone'] = $this->encodeStringData($order['telephone'], 20);
+            $api_data['currency'] = self::DEFAULT_CURRENCY;
+            $api_data['amount'] = $this->currency->format($order['total'], $order['currency_code'], false, false);
+            $api_data['transaction_id'] = self::PURPOSE_FIRLD_PREFIX . $orderId;
+            $api_data['redirect_url'] = $this->url->link('extension/payment/instamojo/confirm');
+            $this->validator->set_validation_type(__FUNCTION__);
+            if ($this->validator->validate([], $api_data)) {
+                $this->logger->write('Data sent for initiate gateway order' . print_r($api_data, true));
+                $response = $this->getInstamojoObject()->initiateGatewayOrder($api_data);
+                $this->logger->write("Response from server on initiate gateway order" . print_r($response, true));
+                if (isset($response->order)) {
+                    return array('status' => 'success', 'redirect' => $response->payment_options->payment_url);
+                }
+                return array('status' => 'error', 'response' => $response);
+            }
+            return array('status' => 'error', 'response' => $this->validator->get_validation_errors());
+        } catch (CurlException $e) {
+            $this->handleCurlException($e);
+        } catch (ValidationException $e) {
+            $this->handleValidationException($e);
+        } catch (Exception $e) {
+            $this->handleException($e);
         }
     }
     
-    private function encode_string_data($string_data, $max_length = null)
+    public function getGatewayOrder(string $id)
+    {    
+        $this->logger->write("Get Gateway Order for id: $id");
+        try {
+            $this->validator->set_validation_type(__FUNCTION__);
+            if ($this->validator->validate(['id' => $id])) {
+                $this->logger->write('Data sent for getting gateway order');
+                $response = $this->getInstamojoObject()->getGatewayOrder($id);
+                $this->logger->write("Response from server on getting gateway order" . print_r($response, true));
+                if (isset($response->id)) {
+                    return array('status' => 'success', 'response' => $response);
+                }
+                return array('status' => 'error', 'response' => $response);
+            }
+            return array('status' => 'error', 'response' => $this->validator->get_validation_errors());
+        } catch (CurlException $e) {
+            $this->handleCurlException($e);
+        } catch (ValidationException $e) {
+            $this->handleValidationException($e);
+        } catch (Exception $e) {
+            $this->handleException($e);
+        }
+    }
+            
+    public function getCheckoutOptionsForGatewayOrder(string $id)
+    {
+        $this->logger->write("Get Checkout Options for Gateway Order for id: $id");
+        try {
+            $this->validator->set_validation_type(__FUNCTION__);
+            if ($this->validator->validate(['id' => $id])) {
+                $this->logger->write('Data sent for getting checkout options for gateway order');
+                $response = $this->getInstamojoObject()->getCheckoutOptionForGatewayOrder($id);
+                $this->logger->write("Response from server on getting checkout options for gateway order " . print_r($response, true));
+                if (isset($response->payment_options)) {
+                    return array('status' => 'success', 'response' => $response);
+                }
+                return array('status' => 'error', 'response' => $response);
+            }
+            return array('status' => 'error', 'response' => $this->validator->get_validation_errors());
+        } catch (CurlException $e) {
+            $this->handleCurlException($e);
+        } catch (ValidationException $e) {
+            $this->handleValidationException($e);
+        } catch (Exception $e) {
+            $this->handleException($e);
+        }
+    }
+    
+    private function encodeStringData($string_data, $max_length = null)
     {
         $string_data = html_entity_decode($string_data, ENT_QUOTES, 'UTF-8');
 
@@ -279,9 +351,8 @@ class ControllerExtensionPaymentInstamojo extends Controller
         return substr($string_data, 0, $max_length);
     }
 
-    private function remove_empty_elements_from_array($data_array)
+    private function removeEmptyElementsFromArray($data_array)
     {
         return array_filter($data_array, function($value) { return !is_null($value) && $value !== ''; });
     }
-
 }
